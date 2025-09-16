@@ -1,7 +1,7 @@
 SET SESSION skip_results_cache=true;
 
 --- ICEBERG ------------
---DROP SCHEMA IF EXISTS victorc_iceberg;
+-- DROP SCHEMA IF EXISTS victorc_iceberg;
 
 CREATE SCHEMA IF NOT EXISTS iceberg_glue.victorc_iceberg WITH (location = 's3://victorc-data/iceberg/');
 SHOW CREATE SCHEMA "iceberg_glue"."victorc_iceberg";
@@ -24,6 +24,7 @@ WITH (
   merge_mode = 'merge-on-read'
 -- merge_mode = 'copy-on-write'
 -- location = 's3://my-bucket/a/path/'
+-- sorted_by = ARRAY['order_date']
 ) AS
 SELECT
     c.custkey,
@@ -42,16 +43,22 @@ SHOW CREATE TABLE customer;
 
 SELECT * FROM customer ASC ORDER BY name;
 
+------- Get Columns Statistics for Trino CBO -----------------------------------------------------------
 
---------- Materialized Views -----------------
+ANALYZE customer;
+SHOW STATS FOR customer;
 
+--------- Views & Materialized Views -----------------
 
-CREATE OR REPLACE MATERIALIZED VIEW test_mv
+CREATE OR REPLACE VIEW my_view
+AS SELECT * FROM tpch.sf1.nation;
+SELECT * FROM my_view;
+
+CREATE OR REPLACE MATERIALIZED VIEW my_mv
 WITH (refresh_schedule = '30 04 * * 0')
 AS SELECT * FROM tpch.sf1.nation;
-
-REFRESH MATERIALIZED VIEW test_mv;
-
+REFRESH MATERIALIZED VIEW my_mv;
+SELECT * FROM my_mv;
 
 --------- Metadata Tables & Columns -----------------------------------------------------------------------------
 
@@ -94,22 +101,45 @@ select * from curr_ver_dets;
 SELECT * FROM customer ORDER BY name;
 
 INSERT INTO customer (custkey, name, mktsegment, account_balance, nation)
-VALUES (200000, 'COMMANDER BUN BUN', 'SQLENGINE', 1, 'FRANCE');
+VALUES (2001 , 'COMMANDER BUN BUN', 'SQLENGINE', 1, 'FRANCE'),
+(2002 , 'COMMANDER BUN BUN', 'SQLENGINE', 2, 'FRANCE'),
+(2003 , 'COMMANDER BUN BUN', 'SQLENGINE', 3, 'FRANCE');
 
+SELECT * FROM customer ORDER BY name; 
+
+---- Row-level changes between two versions of an Iceberg table.
+
+SELECT * FROM "customer$snapshots" ORDER BY committed_at ASC;
+
+SELECT
+    *
+FROM
+    TABLE(
+            system.table_changes(
+                    schema_name => 'victorc_iceberg',
+                    table_name => 'customer',
+                    start_snapshot_id => 8406369957518579897,
+                    end_snapshot_id => 3218270742742274731
+            )
+    )
+ORDER BY _change_ordinal ASC;
+
+--------------- UPDATE -------
+
+UPDATE customer SET account_balance = 1000 WHERE custkey = 2001;
 SELECT * FROM customer ORDER BY name;
 SELECT * FROM "customer$snapshots" ORDER BY committed_at DESC;
 
-UPDATE customer SET account_balance = 1000 WHERE custkey = 200000;
-SELECT * FROM customer ORDER BY name;
-SELECT * FROM "customer$snapshots" ORDER BY committed_at DESC;
 ----- ROW LINEAGE
 SELECT name, custkey,"$row_id", "$last_updated_sequence_number" FROM customer ORDER BY name;
 
-DELETE FROM customer WHERE custkey = 200000;
+DELETE FROM customer WHERE custkey IN (2001,2002,2003);
 SELECT * FROM customer ORDER BY name;
 SELECT * FROM "customer$snapshots" ORDER BY committed_at DESC;
+
 ----- DELETION VECTOR
 SELECT file_path, file_format FROM "customer$files";
+
 
 -- MERGE INTO s3lakehouse.blog.customer_base AS b
 -- USING s3lakehouse.blog.customer_land AS l
@@ -125,6 +155,7 @@ SELECT file_path, file_format FROM "customer$files";
 --             VALUES(l.custkey, l.name, l.state, l.zip, l.cust_since,l.last_update_dt);
 
 ------- ALTER / Schema Evolution --------------------------------------------------------------------------------
+
 SELECT * FROM "customer$snapshots" ORDER BY committed_at DESC;
 SELECT * FROM customer ORDER BY name;
 
@@ -134,10 +165,16 @@ ALTER TABLE customer ADD COLUMN phone varchar DEFAULT '+33606060606';
 INSERT INTO customer (custkey,name,mktsegment,account_balance,nation) 
 VALUES (200000, 'COMMANDER BUN BUN', 'SQLENGINE', 1, 'FRANCE');
 
+SELECT * FROM customer ORDER BY name;
+
 ----- VARIANT / JSON TYPE
 ALTER TABLE customer ADD COLUMN message JSON;
 INSERT INTO customer (custkey,name,mktsegment,account_balance,nation,message)
 VALUES (200000, 'COMMANDER BUN BUN', 'SQLENGINE', 1, 'FRANCE',JSON '{"company": "Starburst"}');
+
+SELECT * FROM customer ORDER BY name;
+
+ALTER TABLE customer DROP COLUMN message;
 
 ----- NANOSECOND
 ALTER TABLE customer ADD COLUMN nanos TIMESTAMP(9);
@@ -164,15 +201,20 @@ INSERT INTO customer (custkey,name,mktsegment,account_balance,nation) VALUES (20
 SELECT * FROM "customer$snapshots" ORDER BY committed_at DESC;
 SELECT * FROM "customer$partitions";
 
+SELECT * FROM "customer$files";
+
 ------- Time Travel / Snapshots -----------------------------------------------------------------------------------------
 
 SELECT * FROM "customer$snapshots" ORDER BY committed_at ASC;
 
 SELECT * FROM customer where mktsegment='SQLENGINE';
---SELECT * FROM customer FOR VERSION AS OF <snapshot_id> where mktsegment='SQLENGINE'  ORDER BY name;
+SELECT * FROM customer FOR VERSION AS OF 8473842087929510856 where mktsegment='SQLENGINE'  ORDER BY name;
 
---CALL system.rollback_to_snapshot('victorc_iceberg', 'customer', <snapshot_id>);
+CALL system.rollback_to_snapshot('victorc_iceberg', 'customer', 8473842087929510856);
 SELECT * FROM customer where mktsegment='SQLENGINE';
+
+select * from curr_ver_dets;
+
 
 -------------------------------------------------------
 --------------- BRANCHING -----------------------------
@@ -193,26 +235,43 @@ INSERT INTO customer @ dev(custkey,name,mktsegment,account_balance,nation) VALUE
 DELETE FROM customer @ dev WHERE custkey = 200001;
 UPDATE customer @ dev SET account_balance = 0 WHERE custkey = 200000;
 
+SELECT * FROM customer FOR VERSION AS OF 'dev' where mktsegment='SQLENGINE';
+
+SELECT * FROM customer FOR VERSION AS OF 'main' where mktsegment='SQLENGINE';
+
 SELECT * FROM customer where mktsegment='SQLENGINE';
 
 ALTER BRANCH main IN TABLE customer FAST FORWARD TO dev;
 
 SELECT * FROM customer where mktsegment='SQLENGINE';
 
+select * from curr_ver_dets;
+
+
 ------- Optimize / Compaction - Vacuum / Cleaning snapshots and orphan files --------------------------
+
+SELECT * FROM "customer$files";
 
 ALTER TABLE customer EXECUTE expire_snapshots(retention_threshold => '7d');
 ALTER TABLE customer EXECUTE remove_orphan_files(retention_threshold => '7d');
 
-ALTER TABLE customer EXECUTE optimize(file_size_threshold => '200MB');
+ALTER TABLE customer EXECUTE optimize(file_size_threshold => '100MB');
+
+SELECT * FROM "customer$files";
 
 ALTER TABLE customer EXECUTE optimize 
 WHERE "$file_modified_time" > CAST(now() - INTERVAL '2' DAY AS DATE);
 
-------- Get Columns Statistics for Trino CBO -----------------------------------------------------------
+------- Register Table
 
-ANALYZE customer;
-SHOW STATS FOR customer;
+DROP TABLE IF EXISTS new_customer;
+
+CALL system.register_table(
+  schema_name => 'victorc_iceberg', 
+  table_name => 'new_customer', 
+  table_location => 's3://victorc-data/iceberg/customer-ed471ca38e834af59c524e424ef0ddfc');
+
+SELECT * FROM new_customer;
 
 
 ------- Federation with PostgreSQL data --------------------------------------------------------------------------------
