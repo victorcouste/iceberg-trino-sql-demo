@@ -118,26 +118,28 @@ FROM
             system.table_changes(
                     schema_name => 'victorc_iceberg',
                     table_name => 'customer',
-                    start_snapshot_id => 8406369957518579897,
-                    end_snapshot_id => 3218270742742274731
+                    start_snapshot_id => 8971812331224479488,
+                    end_snapshot_id => 5174658899552221530
             )
     )
 ORDER BY _change_ordinal ASC;
 
---------------- UPDATE -------
+------------------------ UPDATE ----------------
 
 UPDATE customer SET account_balance = 1000 WHERE custkey = 2001;
 SELECT * FROM customer ORDER BY name;
 SELECT * FROM "customer$snapshots" ORDER BY committed_at DESC;
 
------ ROW LINEAGE
+----- ROW LINEAGE ---------
+
 SELECT name, custkey,"$row_id", "$last_updated_sequence_number" FROM customer ORDER BY name;
 
 DELETE FROM customer WHERE custkey IN (2001,2002,2003);
 SELECT * FROM customer ORDER BY name;
 SELECT * FROM "customer$snapshots" ORDER BY committed_at DESC;
 
------ DELETION VECTOR
+----- DELETION VECTOR ---------
+
 SELECT file_path, file_format FROM "customer$files";
 
 
@@ -159,7 +161,8 @@ SELECT file_path, file_format FROM "customer$files";
 SELECT * FROM "customer$snapshots" ORDER BY committed_at DESC;
 SELECT * FROM customer ORDER BY name;
 
------ DEFAULT COLUMN VALUE
+----- DEFAULT COLUMN VALUE ---------
+
 ALTER TABLE customer ADD COLUMN phone varchar DEFAULT '+33606060606';
 
 INSERT INTO customer (custkey,name,mktsegment,account_balance,nation) 
@@ -167,7 +170,8 @@ VALUES (200000, 'COMMANDER BUN BUN', 'SQLENGINE', 1, 'FRANCE');
 
 SELECT * FROM customer ORDER BY name;
 
------ VARIANT / JSON TYPE
+----- VARIANT / JSON TYPE ---------
+
 ALTER TABLE customer ADD COLUMN message JSON;
 INSERT INTO customer (custkey,name,mktsegment,account_balance,nation,message)
 VALUES (200000, 'COMMANDER BUN BUN', 'SQLENGINE', 1, 'FRANCE',JSON '{"company": "Starburst"}');
@@ -176,7 +180,8 @@ SELECT * FROM customer ORDER BY name;
 
 ALTER TABLE customer DROP COLUMN message;
 
------ NANOSECOND
+----- NANOSECOND ---------
+ 
 ALTER TABLE customer ADD COLUMN nanos TIMESTAMP(9);
 INSERT INTO customer (custkey,name,mktsegment,account_balance,nation,nanos)
 VALUES (200000, 'COMMANDER BUN BUN', 'SQLENGINE', 1, 'FRANCE',TIMESTAMP '2025-08-21 12:34:56.123456789');
@@ -208,9 +213,9 @@ SELECT * FROM "customer$files";
 SELECT * FROM "customer$snapshots" ORDER BY committed_at ASC;
 
 SELECT * FROM customer where mktsegment='SQLENGINE';
-SELECT * FROM customer FOR VERSION AS OF 8473842087929510856 where mktsegment='SQLENGINE'  ORDER BY name;
+SELECT * FROM customer FOR VERSION AS OF 5174658899552221530 where mktsegment='SQLENGINE'  ORDER BY name;
 
-CALL system.rollback_to_snapshot('victorc_iceberg', 'customer', 8473842087929510856);
+CALL system.rollback_to_snapshot('victorc_iceberg', 'customer', 5174658899552221530);
 SELECT * FROM customer where mktsegment='SQLENGINE';
 
 select * from curr_ver_dets;
@@ -262,14 +267,16 @@ SELECT * FROM "customer$files";
 ALTER TABLE customer EXECUTE optimize 
 WHERE "$file_modified_time" > CAST(now() - INTERVAL '2' DAY AS DATE);
 
-------- Register Table
+--------------  Register Table ------------------------------------------
 
 DROP TABLE IF EXISTS new_customer;
+
+SELECT * FROM "customer$properties";
 
 CALL system.register_table(
   schema_name => 'victorc_iceberg', 
   table_name => 'new_customer', 
-  table_location => 's3://victorc-data/iceberg/customer-ed471ca38e834af59c524e424ef0ddfc');
+  table_location => 's3://victorc-data/iceberg/customer-ddaf4ed693ae48c686e1722aa0ce12dd');
 
 SELECT * FROM new_customer;
 
